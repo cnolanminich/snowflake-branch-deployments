@@ -1,0 +1,13 @@
+type: snowflake_branch_deployments.components.SnowflakeBranchPipelineComponent
+attributes:
+  demo_mode: true
+  account: my_account
+  user: my_user
+  warehouse: COMPUTE_WH
+  role: TRANSFORMER
+  production_database: ANALYTICS_PROD
+  local_database: ANALYTICS_DEV
+---
+type: snowflake_branch_deployments.components.PipelineSchedulesComponent
+attributes:
+  default_status: STOPPED

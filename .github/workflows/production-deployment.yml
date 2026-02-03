@@ -1,0 +1,51 @@
+name: Production Deployment
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  DAGSTER_CLOUD_URL: ${{ secrets.DAGSTER_CLOUD_URL }}
+  DAGSTER_CLOUD_API_TOKEN: ${{ secrets.DAGSTER_CLOUD_API_TOKEN }}
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Validate Dagster definitions
+        env:
+          DAGSTER_CLOUD_DEPLOYMENT_NAME: prod
+          DEMO_MODE: "false"
+        run: uv run dg check defs
+
+      - name: Deploy to Dagster Cloud Production
+        uses: dagster-io/dagster-cloud-action/actions/hybrid_prod_deployment@v0.1
+        with:
+          dagster_cloud_api_token: ${{ secrets.DAGSTER_CLOUD_API_TOKEN }}
+          location: snowflake-branch-deployments
+          deployment: prod
+        env:
+          DAGSTER_CLOUD_DEPLOYMENT_NAME: prod
+          SNOWFLAKE_DATABASE: ANALYTICS_PROD
+
+      - name: Notify deployment success
+        run: |
+          echo "✅ Deployed to production"
+          echo "Database: ANALYTICS_PROD"
+          echo "Dagster deployment: prod"

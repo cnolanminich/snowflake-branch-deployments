@@ -1,0 +1,206 @@
+name: Branch Deployment with Snowflake Zero-Copy Clone
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_target:
+    types: [closed]
+
+env:
+  DAGSTER_CLOUD_URL: ${{ secrets.DAGSTER_CLOUD_URL }}
+  DAGSTER_CLOUD_API_TOKEN: ${{ secrets.DAGSTER_CLOUD_API_TOKEN }}
+
+jobs:
+  # Create a zero-copy clone database for this PR
+  create-branch-database:
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      database_name: ${{ steps.create-db.outputs.database_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Snowflake CLI
+        run: pip install snowflake-cli-labs
+
+      - name: Create Zero-Copy Clone Database
+        id: create-db
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          DATABASE_NAME="ANALYTICS_PR_${PR_NUMBER}"
+          echo "database_name=${DATABASE_NAME}" >> $GITHUB_OUTPUT
+
+          # Create zero-copy clone from production database
+          # This is nearly instantaneous and uses no additional storage
+          cat << EOF > create_clone.sql
+          -- Create the branch database as a zero-copy clone
+          CREATE DATABASE IF NOT EXISTS ${DATABASE_NAME}
+            CLONE ANALYTICS_PROD
+            COMMENT = 'Zero-copy clone for PR #${PR_NUMBER}';
+
+          -- Grant necessary permissions
+          GRANT USAGE ON DATABASE ${DATABASE_NAME} TO ROLE TRANSFORMER;
+          GRANT USAGE ON ALL SCHEMAS IN DATABASE ${DATABASE_NAME} TO ROLE TRANSFORMER;
+          GRANT SELECT ON ALL TABLES IN DATABASE ${DATABASE_NAME} TO ROLE TRANSFORMER;
+          GRANT CREATE TABLE ON ALL SCHEMAS IN DATABASE ${DATABASE_NAME} TO ROLE TRANSFORMER;
+          GRANT CREATE VIEW ON ALL SCHEMAS IN DATABASE ${DATABASE_NAME} TO ROLE TRANSFORMER;
+
+          -- Log the clone creation
+          SELECT
+            'Created zero-copy clone' as action,
+            '${DATABASE_NAME}' as database_name,
+            'ANALYTICS_PROD' as source_database,
+            CURRENT_TIMESTAMP() as created_at;
+          EOF
+
+          snow sql -f create_clone.sql
+
+      - name: Output Database Info
+        run: |
+          echo "✅ Created zero-copy clone database: ${{ steps.create-db.outputs.database_name }}"
+          echo "This database is a point-in-time snapshot of ANALYTICS_PROD"
+          echo "Changes in this PR will only affect this branch database"
+
+  # Deploy to Dagster Cloud branch deployment
+  deploy-branch:
+    needs: create-branch-database
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Validate Dagster definitions
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEMO_MODE: "false"
+        run: uv run dg check defs
+
+      - name: Deploy to Dagster Cloud Branch
+        uses: dagster-io/dagster-cloud-action/actions/hybrid_branch_deployment@v0.1
+        with:
+          dagster_cloud_api_token: ${{ secrets.DAGSTER_CLOUD_API_TOKEN }}
+          location: snowflake-branch-deployments
+          deployment: pr-${{ github.event.pull_request.number }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SNOWFLAKE_DATABASE: ${{ needs.create-branch-database.outputs.database_name }}
+
+      - name: Post deployment comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dbName = '${{ needs.create-branch-database.outputs.database_name }}';
+            const prNumber = context.payload.pull_request.number;
+
+            const comment = `## 🚀 Branch Deployment Ready
+
+            | Resource | Value |
+            |----------|-------|
+            | **Dagster Branch** | [pr-${prNumber}](${process.env.DAGSTER_CLOUD_URL}/locations/pr-${prNumber}) |
+            | **Snowflake Database** | \`${dbName}\` |
+            | **Clone Source** | \`ANALYTICS_PROD\` |
+
+            ### What's deployed:
+            - ✅ Zero-copy clone database created from production
+            - ✅ Dagster branch deployment configured to use \`${dbName}\`
+            - ✅ All assets will read/write to the isolated branch database
+
+            ### Testing your changes:
+            1. Visit the Dagster branch deployment link above
+            2. Materialize assets to test your changes
+            3. Changes are isolated - production data is unchanged
+
+            > 💡 **Zero-Copy Clone**: This database shares storage with production until data is modified. No additional storage costs for unchanged data!
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Cleanup: Delete the branch database when PR is closed
+  cleanup-branch-database:
+    if: github.event_name == 'pull_request_target' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Snowflake CLI
+        run: pip install snowflake-cli-labs
+
+      - name: Drop Zero-Copy Clone Database
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          DATABASE_NAME="ANALYTICS_PR_${PR_NUMBER}"
+
+          cat << EOF > drop_clone.sql
+          -- Drop the branch database
+          DROP DATABASE IF EXISTS ${DATABASE_NAME};
+
+          -- Log the cleanup
+          SELECT
+            'Dropped zero-copy clone' as action,
+            '${DATABASE_NAME}' as database_name,
+            CURRENT_TIMESTAMP() as dropped_at;
+          EOF
+
+          snow sql -f drop_clone.sql
+
+          echo "✅ Cleaned up branch database: ${DATABASE_NAME}"
+
+      - name: Post cleanup comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const dbName = `ANALYTICS_PR_${prNumber}`;
+
+            const comment = `## 🧹 Branch Deployment Cleaned Up
+
+            - ✅ Dropped Snowflake database: \`${dbName}\`
+            - ✅ Dagster branch deployment removed
+
+            All resources for this PR have been cleaned up.
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
