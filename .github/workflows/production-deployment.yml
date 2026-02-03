@@ -30,8 +30,7 @@ jobs:
 
       - name: Validate Dagster definitions
         env:
-          DAGSTER_CLOUD_DEPLOYMENT_NAME: prod
-          DEMO_MODE: "false"
+          SNOWFLAKE_DATABASE: ANALYTICS_PROD
         run: uv run dg check defs
 
       - name: Deploy to Dagster Cloud Production
@@ -41,8 +40,11 @@ jobs:
           location: snowflake-branch-deployments
           deployment: prod
         env:
-          DAGSTER_CLOUD_DEPLOYMENT_NAME: prod
+          # SnowflakeResource uses this to connect to production
           SNOWFLAKE_DATABASE: ANALYTICS_PROD
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
 
       - name: Notify deployment success
         run: |

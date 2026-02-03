@@ -95,8 +95,7 @@ jobs:
 
       - name: Validate Dagster definitions
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          DEMO_MODE: "false"
+          SNOWFLAKE_DATABASE: ${{ needs.create-branch-database.outputs.database_name }}
         run: uv run dg check defs
 
       - name: Deploy to Dagster Cloud Branch
@@ -106,8 +105,11 @@ jobs:
           location: snowflake-branch-deployments
           deployment: pr-${{ github.event.pull_request.number }}
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # SnowflakeResource uses this to connect to the cloned database
           SNOWFLAKE_DATABASE: ${{ needs.create-branch-database.outputs.database_name }}
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
 
       - name: Post deployment comment
         uses: actions/github-script@v7
@@ -124,10 +126,13 @@ jobs:
             | **Snowflake Database** | \`${dbName}\` |
             | **Clone Source** | \`ANALYTICS_PROD\` |
 
-            ### What's deployed:
-            - ✅ Zero-copy clone database created from production
-            - ✅ Dagster branch deployment configured to use \`${dbName}\`
-            - ✅ All assets will read/write to the isolated branch database
+            ### How it works:
+            The \`SnowflakeResource\` is configured with:
+            \`\`\`
+            SNOWFLAKE_DATABASE=${dbName}
+            \`\`\`
+
+            All assets use this resource, so queries automatically target the branch database.
 
             ### Testing your changes:
             1. Visit the Dagster branch deployment link above

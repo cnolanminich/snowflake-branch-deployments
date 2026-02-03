@@ -4,22 +4,35 @@ This demo showcases **Dagster's branch deployment pattern with Snowflake zero-co
 
 ## Key Features
 
-- **Environment-aware database selection** - Automatically uses the correct Snowflake database based on deployment context
+- **SnowflakeResource with environment variables** - Database configured via `SNOWFLAKE_DATABASE` env var
 - **Zero-copy cloning for PRs** - Each pull request gets its own isolated database clone with no additional storage cost
 - **GitHub Actions integration** - Automated branch database creation and cleanup
 - **Demo mode** - Run locally without Snowflake credentials for development
 
 ## How It Works
 
-### Environment Detection
+### Resource Configuration
 
-The `SnowflakeBranchPipelineComponent` automatically selects the appropriate database:
+The `SnowflakeResource` is configured via environment variables:
 
-| Environment | Detection | Database |
-|-------------|-----------|----------|
-| **Production** | `DAGSTER_CLOUD_DEPLOYMENT_NAME=prod` | `ANALYTICS_PROD` |
-| **Branch/PR** | `PR_NUMBER` environment variable | `ANALYTICS_PR_<number>` |
-| **Local** | No env vars set | `ANALYTICS_DEV` |
+```python
+SnowflakeResource(
+    account=EnvVar("SNOWFLAKE_ACCOUNT"),
+    user=EnvVar("SNOWFLAKE_USER"),
+    password=EnvVar("SNOWFLAKE_PASSWORD"),
+    database=EnvVar("SNOWFLAKE_DATABASE"),  # Set by CI/CD
+    warehouse="COMPUTE_WH",
+    role="TRANSFORMER",
+)
+```
+
+GitHub Actions sets `SNOWFLAKE_DATABASE` based on the deployment context:
+
+| Environment | SNOWFLAKE_DATABASE |
+|-------------|-------------------|
+| **Production** | `ANALYTICS_PROD` |
+| **Branch/PR** | `ANALYTICS_PR_<number>` |
+| **Local** | `ANALYTICS_DEV` (default) |
 
 ### Zero-Copy Cloning Benefits
 
@@ -41,7 +54,7 @@ snowflake-branch-deployments/
 ├── src/
 │   └── snowflake_branch_deployments/
 │       ├── components/
-│       │   ├── snowflake_pipeline.py     # Environment-aware assets
+│       │   ├── snowflake_pipeline.py     # Assets using SnowflakeResource
 │       │   └── pipeline_schedules.py     # Jobs and schedules
 │       └── defs/
 │           └── pipeline/
@@ -101,14 +114,14 @@ snowflake-branch-deployments/
 ### When a PR is opened:
 
 1. GitHub Action creates a zero-copy clone: `ANALYTICS_PR_<number>`
-2. Dagster branch deployment is created with `PR_NUMBER` env var
+2. Dagster branch deployment is created with `SNOWFLAKE_DATABASE` set to the clone
 3. Comment posted to PR with database and deployment links
 
 ### When working on a PR:
 
-- All asset materializations write to `ANALYTICS_PR_<number>`
+- All asset materializations use the `SnowflakeResource` configured for the branch
+- SQL queries automatically target the branch database
 - Production data remains unchanged
-- Test changes in complete isolation
 
 ### When PR is merged/closed:
 
